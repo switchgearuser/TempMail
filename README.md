@@ -11,7 +11,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python)](https://python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 
-[🌐 Live Demo](https://temp-email-demo.com) | [📖 Documentation](#api-documentation) | [🐛 Report Bug](../../issues) | [💡 Request Feature](../../issues)
+[🌐 Live Demo](https://t.me/tempmailswitch2) | [📖 Documentation](#api-documentation) | [🐛 Report Bug](../../issues) | [💡 Request Feature](../../issues)
 
 </div>
 
