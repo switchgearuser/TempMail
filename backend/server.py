@@ -1,75 +1,231 @@
-from fastapi import FastAPI, APIRouter
-from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 import os
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, validator
+from typing import List, Optional, Dict, Any
+import asyncio
+import aiohttp
+import json
 import logging
-from pathlib import Path
-from pydantic import BaseModel, Field
-from typing import List
+from datetime import datetime, timedelta
+import random
 import uuid
-from datetime import datetime
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+app = FastAPI(
+    title="Temporary Email Service",
+    description="Сервис для создания одноразовых email адресов",
+    version="1.0.0"
+)
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
-
-# Create the main app without a prefix
-app = FastAPI()
-
-# Create a router with the /api prefix
-api_router = APIRouter(prefix="/api")
-
-
-# Define Models
-class StatusCheck(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-
-class StatusCheckCreate(BaseModel):
-    client_name: str
-
-# Add your routes to the router instead of directly to app
-@api_router.get("/")
-async def root():
-    return {"message": "Hello World"}
-
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.dict()
-    status_obj = StatusCheck(**status_dict)
-    _ = await db.status_checks.insert_one(status_obj.dict())
-    return status_obj
-
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    status_checks = await db.status_checks.find().to_list(1000)
-    return [StatusCheck(**status_check) for status_check in status_checks]
-
-# Include the router in the main app
-app.include_router(api_router)
-
+# CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Pydantic models
+class EmailAddress(BaseModel):
+    id: str
+    email: str
+    domain: str
+    password: str
+    created_at: datetime
+    token: Optional[str] = None
 
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
+class EmailMessage(BaseModel):
+    id: str
+    from_address: str
+    to_address: str
+    subject: str
+    body: str
+    html_body: Optional[str] = None
+    received_at: datetime
+    attachments: List[Dict[str, Any]] = []
+
+class CreateEmailRequest(BaseModel):
+    custom_name: Optional[str] = None
+
+class EmailInboxResponse(BaseModel):
+    inbox: EmailAddress
+    messages: List[EmailMessage] = []
+    message_count: int = 0
+
+# Mail.tm API integration
+class MailTmAdapter:
+    def __init__(self, base_url: str = "https://api.mail.tm"):
+        self.base_url = base_url
+        self.sessions = {}
+        
+    async def _get_session(self):
+        session = aiohttp.ClientSession()
+        return session
+    
+    async def _make_request(self, method: str, endpoint: str, token: str = None, **kwargs):
+        async with aiohttp.ClientSession() as session:
+            url = f"{self.base_url}{endpoint}"
+            
+            headers = kwargs.get('headers', {})
+            if token:
+                headers['Authorization'] = f'Bearer {token}'
+            kwargs['headers'] = headers
+            
+            try:
+                async with session.request(method, url, **kwargs) as response:
+                    if response.status in [200, 201]:
+                        return await response.json()
+                    elif response.status == 404:
+                        return None
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"Mail.tm request failed: {response.status} - {error_text}")
+                        raise HTTPException(status_code=response.status, detail=error_text)
+            except aiohttp.ClientError as e:
+                logger.error(f"Mail.tm request failed: {e}")
+                raise HTTPException(status_code=500, detail=f"Request failed: {str(e)}")
+    
+    async def get_domains(self) -> List[str]:
+        try:
+            response = await self._make_request('GET', '/domains')
+            if response and 'hydra:member' in response:
+                domains = [domain['domain'] for domain in response['hydra:member']]
+                return domains if domains else ['1secmail.com']
+            return ['1secmail.com']
+        except Exception as e:
+            logger.error(f"Failed to get domains: {e}")
+            return ['1secmail.com']
+    
+    async def create_inbox(self, name: Optional[str] = None) -> EmailAddress:
+        try:
+            domains = await self.get_domains()
+            domain = domains[0]
+            
+            if not name:
+                name = f"user{int(datetime.now().timestamp())}{random.randint(100, 999)}"
+            
+            email_address = f"{name}@{domain}"
+            password = f"password{random.randint(10000, 99999)}"
+            
+            # Create account
+            account_data = {
+                "address": email_address,
+                "password": password
+            }
+            
+            account = await self._make_request('POST', '/accounts', json=account_data)
+            if not account:
+                raise HTTPException(status_code=500, detail="Failed to create account")
+            
+            # Login to get token
+            token_response = await self._make_request('POST', '/token', json=account_data)
+            token = None
+            if token_response and 'token' in token_response:
+                token = token_response['token']
+            
+            return EmailAddress(
+                id=account['id'],
+                email=email_address,
+                domain=domain,
+                password=password,
+                created_at=datetime.now(),
+                token=token
+            )
+        except Exception as e:
+            logger.error(f"Mail.tm inbox creation failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to create inbox: {str(e)}")
+    
+    async def get_messages(self, token: str) -> List[EmailMessage]:
+        try:
+            response = await self._make_request('GET', '/messages', token=token)
+            if not response or 'hydra:member' not in response:
+                return []
+            
+            messages = []
+            for msg_data in response['hydra:member']:
+                # Get full message content
+                msg_id = msg_data['id']
+                full_message = await self._make_request('GET', f'/messages/{msg_id}', token=token)
+                
+                if full_message:
+                    message = EmailMessage(
+                        id=full_message['id'],
+                        from_address=full_message.get('from', {}).get('address', ''),
+                        to_address=full_message.get('to', [{}])[0].get('address', ''),
+                        subject=full_message.get('subject', ''),
+                        body=full_message.get('text', ''),
+                        html_body=full_message.get('html', []),
+                        received_at=datetime.fromisoformat(
+                            full_message.get('createdAt', datetime.now().isoformat()).replace('Z', '+00:00')
+                        )
+                    )
+                    messages.append(message)
+            
+            return messages
+        except Exception as e:
+            logger.error(f"Mail.tm message retrieval failed: {e}")
+            return []
+
+# Global service instance
+mail_service = MailTmAdapter()
+
+# API Routes
+@app.post("/api/inbox/create", response_model=EmailInboxResponse)
+async def create_inbox(request: CreateEmailRequest):
+    """
+    Создать новый временный email адрес
+    """
+    try:
+        logger.info(f"Creating inbox with custom name: {request.custom_name}")
+        inbox = await mail_service.create_inbox(name=request.custom_name)
+        
+        logger.info(f"Successfully created inbox: {inbox.email}")
+        return EmailInboxResponse(inbox=inbox, messages=[], message_count=0)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error creating inbox: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/inbox/{inbox_id}/messages", response_model=List[EmailMessage])
+async def get_inbox_messages(inbox_id: str, token: str):
+    """
+    Получить все сообщения из временного email адреса
+    """
+    try:
+        logger.info(f"Retrieving messages for inbox {inbox_id}")
+        messages = await mail_service.get_messages(token)
+        
+        logger.info(f"Retrieved {len(messages)} messages")
+        return messages
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error retrieving messages: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/domains", response_model=List[str])
+async def get_available_domains():
+    """Получить список доступных доменов"""
+    try:
+        domains = await mail_service.get_domains()
+        return domains
+    except Exception as e:
+        logger.error(f"Error getting domains: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8001)
