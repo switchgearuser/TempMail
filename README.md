@@ -64,7 +64,7 @@
 1. **Клонируйте репозиторий**
 ```bash
 git clone https://github.com/switchgearuser/TempMail/
-cd temporary-email-service
+cd tempmail
 ```
 
 2. **Установите зависимости backend**
