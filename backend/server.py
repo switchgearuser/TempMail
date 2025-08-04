@@ -108,6 +108,9 @@ class MailTmAdapter:
             
             if not name:
                 name = f"user{int(datetime.now().timestamp())}{random.randint(100, 999)}"
+            else:
+                # Add timestamp to custom name to ensure uniqueness
+                name = f"{name}{int(datetime.now().timestamp())}{random.randint(10, 99)}"
             
             email_address = f"{name}@{domain}"
             password = f"password{random.randint(10000, 99999)}"
