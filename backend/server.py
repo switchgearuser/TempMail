@@ -156,13 +156,20 @@ class MailTmAdapter:
                 full_message = await self._make_request('GET', f'/messages/{msg_id}', token=token)
                 
                 if full_message:
+                    # Handle html_body properly - it can be a list or string
+                    html_body = full_message.get('html', [])
+                    if isinstance(html_body, list):
+                        html_body = ' '.join(html_body) if html_body else None
+                    elif not html_body:
+                        html_body = None
+                    
                     message = EmailMessage(
                         id=full_message['id'],
                         from_address=full_message.get('from', {}).get('address', ''),
                         to_address=full_message.get('to', [{}])[0].get('address', ''),
                         subject=full_message.get('subject', ''),
                         body=full_message.get('text', ''),
-                        html_body=full_message.get('html', []),
+                        html_body=html_body,
                         received_at=datetime.fromisoformat(
                             full_message.get('createdAt', datetime.now().isoformat()).replace('Z', '+00:00')
                         )
