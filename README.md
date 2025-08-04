@@ -63,7 +63,7 @@
 
 1. **Клонируйте репозиторий**
 ```bash
-git clone https://github.com/yourusername/temporary-email-service.git
+git clone https://github.com/switchgearuser/TempMail/
 cd temporary-email-service
 ```
 
